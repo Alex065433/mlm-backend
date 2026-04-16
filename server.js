@@ -10,7 +10,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
 
-/* ================= DB CONNECTION ================= */
+/* ================= DB ================= */
 
 const db = mysql.createPool({
   host: process.env.DB_HOST,
@@ -95,7 +95,10 @@ async function updateCounts(user_id, position) {
       await query("UPDATE users SET right_count = right_count + 1 WHERE user_id=?", [user_id]);
     }
 
-    const parent = await queryOne("SELECT parent_id, position FROM users WHERE user_id=?", [user_id]);
+    const parent = await queryOne(
+      "SELECT parent_id, position FROM users WHERE user_id=?",
+      [user_id]
+    );
 
     if (!parent) break;
 
@@ -104,7 +107,7 @@ async function updateCounts(user_id, position) {
   }
 }
 
-/* ================= MATCHING INCOME ================= */
+/* ================= MATCHING ================= */
 
 async function checkMatchingIncome(user_id) {
   const user = await queryOne(
@@ -133,7 +136,7 @@ async function checkMatchingIncome(user_id) {
   );
 }
 
-/* ================= CREATE TREE IDS ================= */
+/* ================= CREATE TREE ================= */
 
 async function createTree(user_id, sponsor_id, depth) {
   if (depth <= 0) return;
@@ -149,8 +152,10 @@ async function createTree(user_id, sponsor_id, depth) {
       [newId, sponsor_id, parent.user_id, pos]
     );
 
+    // FIXED LINE (your crash was here)
+    const column = pos === "left" ? "left_child" : "right_child";
     await query(
-      UPDATE users SET ${pos}_child=? WHERE user_id=?,
+      UPDATE users SET ${column}=? WHERE user_id=?,
       [newId, parent.user_id]
     );
 
@@ -184,7 +189,6 @@ app.post("/register", async (req, res) => {
       [mainId]
     );
 
-    // ONLY create tree for >50
     if (package_amount > 50) {
       const levels = Math.floor(package_amount / 100);
       await createTree(mainId, sponsor_id, levels);
@@ -224,18 +228,14 @@ app.post("/withdraw", async (req, res) => {
 
 app.get("/admin/weekly-bonus", async (req, res) => {
   try {
-    await query(
-      "UPDATE wallet SET balance = balance + 10"
-    );
-
+    await query("UPDATE wallet SET balance = balance + 10");
     res.json({ success: true });
-
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-/* ================= NOWPAYMENTS ================= */
+/* ================= PAYMENT ================= */
 
 app.post("/create-payment", async (req, res) => {
   try {
