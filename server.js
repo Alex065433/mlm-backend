@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2/promise");
@@ -56,7 +58,12 @@ async function findPlacement(sponsor_id) {
 
   while (queue.length > 0) {
     const current = queue.shift();
-    const user = await queryOne("SELECT * FROM users WHERE user_id=?", [current]);
+    const user = await queryOne(
+      "SELECT * FROM users WHERE user_id=?",
+      [current]
+    );
+
+    if (!user) break;
 
     if (!user.left_child || !user.right_child) {
       return user;
@@ -65,6 +72,8 @@ async function findPlacement(sponsor_id) {
     queue.push(user.left_child);
     queue.push(user.right_child);
   }
+
+  return null;
 }
 
 /* ================= DIRECT INCOME ================= */
@@ -90,9 +99,15 @@ async function addDirectIncome(sponsor_id, from_user, amount) {
 async function updateCounts(user_id, position) {
   while (user_id) {
     if (position === "left") {
-      await query("UPDATE users SET left_count = left_count + 1 WHERE user_id=?", [user_id]);
+      await query(
+        "UPDATE users SET left_count = left_count + 1 WHERE user_id=?",
+        [user_id]
+      );
     } else {
-      await query("UPDATE users SET right_count = right_count + 1 WHERE user_id=?", [user_id]);
+      await query(
+        "UPDATE users SET right_count = right_count + 1 WHERE user_id=?",
+        [user_id]
+      );
     }
 
     const parent = await queryOne(
@@ -100,7 +115,7 @@ async function updateCounts(user_id, position) {
       [user_id]
     );
 
-    if (!parent) break;
+    if (!parent || !parent.parent_id) break;
 
     position = parent.position;
     user_id = parent.parent_id;
@@ -114,6 +129,8 @@ async function checkMatchingIncome(user_id) {
     "SELECT left_count, right_count FROM users WHERE user_id=?",
     [user_id]
   );
+
+  if (!user) return;
 
   const pairs = Math.min(user.left_count, user.right_count);
   if (pairs <= 0) return;
@@ -142,6 +159,7 @@ async function createTree(user_id, sponsor_id, depth) {
   if (depth <= 0) return;
 
   const parent = await findPlacement(sponsor_id);
+  if (!parent) return;
 
   for (let pos of ["left", "right"]) {
     const newId = "U" + uuidv4().slice(0, 6);
@@ -152,10 +170,11 @@ async function createTree(user_id, sponsor_id, depth) {
       [newId, sponsor_id, parent.user_id, pos]
     );
 
-    // FIXED LINE (your crash was here)
+    // SAFE COLUMN HANDLING
     const column = pos === "left" ? "left_child" : "right_child";
+
     await query(
-      UPDATE users SET ${column}=? WHERE user_id=?,
+      `UPDATE users SET ${column}=? WHERE user_id=?`,
       [newId, parent.user_id]
     );
 
@@ -173,7 +192,7 @@ app.post("/register", async (req, res) => {
   try {
     const { name, email, sponsor_id, package_amount } = req.body;
 
-    if (package_amount < 50) {
+    if (!package_amount || package_amount < 50) {
       return res.json({ error: "Minimum 50 required" });
     }
 
@@ -197,6 +216,7 @@ app.post("/register", async (req, res) => {
     res.json({ success: true, user_id: mainId });
 
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
