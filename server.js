@@ -1,9 +1,8 @@
 const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2/promise");
-const axios = require("axios");
-const crypto = require("crypto");
 const { v4: uuidv4 } = require("uuid");
+const axios = require("axios");
 
 const app = express();
 app.use(cors());
@@ -11,213 +10,250 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
 
-/* ================= DB ================= */
-const pool = mysql.createPool({
+/* ================= DB CONNECTION ================= */
+
+const db = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  port: process.env.DB_PORT
+  port: process.env.DB_PORT || 3306,
 });
 
+/* ================= HELPERS ================= */
+
 async function query(sql, params = []) {
-  const [rows] = await pool.execute(sql, params);
+  const [rows] = await db.execute(sql, params);
   return rows;
 }
 
 async function queryOne(sql, params = []) {
-  const [rows] = await pool.execute(sql, params);
+  const rows = await query(sql, params);
   return rows[0];
 }
 
-/* ================= ADMIN MIDDLEWARE ================= */
-function adminAuth(req, res, next) {
-  const key = req.headers["admin_key"];
-  if (key !== process.env.ADMIN_KEY) {
-    return res.status(403).json({ error: "Unauthorized" });
-  }
-  next();
-}
-
 /* ================= ROOT ================= */
+
 app.get("/", (req, res) => {
   res.send("Backend Running 🚀");
 });
 
-/* ================= REFERRAL LINK ================= */
+/* ================= USERS ================= */
 
-// Example: https://yourapp.com/register?ref=U12345
-app.get("/ref/:user_id", async (req, res) => {
-  const { user_id } = req.params;
-
-  const user = await queryOne("SELECT user_id FROM users WHERE user_id=?", [user_id]);
-  if (!user) return res.json({ error: "Invalid referral" });
-
-  res.json({
-    referral_link: ${req.protocol}://${req.get("host")}/register?ref=${user_id}
-  });
+app.get("/users", async (req, res) => {
+  try {
+    const users = await query("SELECT * FROM users");
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
+
+/* ================= FIND PLACEMENT ================= */
+
+async function findPlacement(sponsor_id) {
+  let queue = [sponsor_id];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    const user = await queryOne("SELECT * FROM users WHERE user_id=?", [current]);
+
+    if (!user.left_child || !user.right_child) {
+      return user;
+    }
+
+    queue.push(user.left_child);
+    queue.push(user.right_child);
+  }
+}
+
+/* ================= DIRECT INCOME ================= */
+
+async function addDirectIncome(sponsor_id, from_user, amount) {
+  if (!sponsor_id) return;
+
+  const income = amount * 0.05;
+
+  await query(
+    "INSERT INTO direct_income (user_id, from_user, amount) VALUES (?, ?, ?)",
+    [sponsor_id, from_user, income]
+  );
+
+  await query(
+    "UPDATE wallet SET balance = balance + ? WHERE user_id=?",
+    [income, sponsor_id]
+  );
+}
+
+/* ================= UPDATE COUNTS ================= */
+
+async function updateCounts(user_id, position) {
+  while (user_id) {
+    if (position === "left") {
+      await query("UPDATE users SET left_count = left_count + 1 WHERE user_id=?", [user_id]);
+    } else {
+      await query("UPDATE users SET right_count = right_count + 1 WHERE user_id=?", [user_id]);
+    }
+
+    const parent = await queryOne("SELECT parent_id, position FROM users WHERE user_id=?", [user_id]);
+
+    if (!parent) break;
+
+    position = parent.position;
+    user_id = parent.parent_id;
+  }
+}
+
+/* ================= MATCHING INCOME ================= */
+
+async function checkMatchingIncome(user_id) {
+  const user = await queryOne(
+    "SELECT left_count, right_count FROM users WHERE user_id=?",
+    [user_id]
+  );
+
+  const pairs = Math.min(user.left_count, user.right_count);
+  if (pairs <= 0) return;
+
+  const income = pairs * 5;
+
+  await query(
+    "INSERT INTO matching_income (user_id, pairs, amount) VALUES (?, ?, ?)",
+    [user_id, pairs, income]
+  );
+
+  await query(
+    "UPDATE wallet SET balance = balance + ? WHERE user_id=?",
+    [income, user_id]
+  );
+
+  await query(
+    "UPDATE users SET left_count = left_count - ?, right_count = right_count - ? WHERE user_id=?",
+    [pairs, pairs, user_id]
+  );
+}
+
+/* ================= CREATE TREE IDS ================= */
+
+async function createTree(user_id, sponsor_id, depth) {
+  if (depth <= 0) return;
+
+  const parent = await findPlacement(sponsor_id);
+
+  for (let pos of ["left", "right"]) {
+    const newId = "U" + uuidv4().slice(0, 6);
+
+    await query(
+      `INSERT INTO users (user_id, sponsor_id, parent_id, position, status)
+       VALUES (?, ?, ?, ?, 'active')`,
+      [newId, sponsor_id, parent.user_id, pos]
+    );
+
+    await query(
+      UPDATE users SET ${pos}_child=? WHERE user_id=?,
+      [newId, parent.user_id]
+    );
+
+    await addDirectIncome(sponsor_id, newId, 50);
+    await updateCounts(parent.user_id, pos);
+    await checkMatchingIncome(parent.user_id);
+
+    await createTree(newId, sponsor_id, depth - 1);
+  }
+}
 
 /* ================= REGISTER ================= */
 
 app.post("/register", async (req, res) => {
-  const { name, email, sponsor_id } = req.body;
-
-  const user_id = "U" + uuidv4().slice(0, 6);
-
-  await query(`
-    INSERT INTO users (user_id,name,email,sponsor_id,status)
-    VALUES (?,?,?,?, 'inactive')
-  `, [user_id, name, email, sponsor_id]);
-
-  await query(INSERT INTO wallet (user_id,balance) VALUES (?,0), [user_id]);
-
-  res.json({
-    success: true,
-    user_id,
-    message: "Registered. Complete payment to activate."
-  });
-});
-
-/* ================= CREATE PAYMENT ================= */
-
-app.post("/create-payment", async (req, res) => {
-  const { user_id, amount } = req.body;
-
   try {
-    const response = await axios.post(
-      "https://api.nowpayments.io/v1/payment",
-      {
-        price_amount: amount,
-        price_currency: "usd",
-        pay_currency: "usdttrc20"
-      },
-      {
-        headers: {
-          "x-api-key": process.env.NOWPAYMENTS_API_KEY
-        }
-      }
-    );
+    const { name, email, sponsor_id, package_amount } = req.body;
 
-    const p = response.data;
+    if (package_amount < 50) {
+      return res.json({ error: "Minimum 50 required" });
+    }
 
-    await query(`
-      INSERT INTO payments (user_id,amount,payment_id,status)
-      VALUES (?,?,?, 'pending')
-    `, [user_id, amount, p.payment_id]);
-
-    res.json(p);
-
-  } catch (err) {
-    res.json({ error: err.message });
-  }
-});
-
-/* ================= WEBHOOK ================= */
-
-app.post("/nowpayments-webhook", async (req, res) => {
-  const signature = req.headers["x-nowpayments-sig"];
-
-  const hash = crypto
-    .createHmac("sha512", process.env.NOWPAYMENTS_IPN_SECRET)
-    .update(JSON.stringify(req.body))
-    .digest("hex");
-
-  if (hash !== signature) return res.sendStatus(403);
-
-  const { payment_id, payment_status } = req.body;
-
-  if (payment_status === "finished") {
-
-    const payment = await queryOne(
-      "SELECT * FROM payments WHERE payment_id=?",
-      [payment_id]
-    );
-
-    if (!payment) return res.sendStatus(404);
-
-    await activateUser(payment.user_id, payment.amount);
+    const mainId = "U" + uuidv4().slice(0, 6);
 
     await query(
-      "UPDATE payments SET status='approved' WHERE payment_id=?",
-      [payment_id]
+      "INSERT INTO users (user_id, name, email, sponsor_id, status) VALUES (?, ?, ?, ?, 'active')",
+      [mainId, name, email, sponsor_id]
     );
+
+    await query(
+      "INSERT INTO wallet (user_id, balance) VALUES (?, 0)",
+      [mainId]
+    );
+
+    // ONLY create tree for >50
+    if (package_amount > 50) {
+      const levels = Math.floor(package_amount / 100);
+      await createTree(mainId, sponsor_id, levels);
+    }
+
+    res.json({ success: true, user_id: mainId });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  res.sendStatus(200);
-});
-
-/* ================= ACTIVATE USER (MLM ENTRY POINT) ================= */
-
-async function activateUser(user_id, amount) {
-
-  const totalIds = Math.floor(amount / 50);
-
-  for (let i = 0; i < totalIds; i++) {
-    const id = "U" + uuidv4().slice(0, 6);
-
-    await query(`
-      INSERT INTO users (user_id,parent_id,status)
-      VALUES (?, ?, 'active')
-    `, [id, user_id]);
-  }
-
-  await query(UPDATE users SET status='active' WHERE user_id=?, [user_id]);
-}
-
-/* ================= WALLET ================= */
-
-app.get("/wallet/:user_id", async (req, res) => {
-  const data = await queryOne(
-    "SELECT balance FROM wallet WHERE user_id=?",
-    [req.params.user_id]
-  );
-  res.json(data);
 });
 
 /* ================= WITHDRAW ================= */
 
 app.post("/withdraw", async (req, res) => {
-  const { user_id, amount } = req.body;
+  try {
+    const { user_id, amount } = req.body;
 
-  const wallet = await queryOne(
-    "SELECT balance FROM wallet WHERE user_id=?",
-    [user_id]
-  );
+    await query(
+      "INSERT INTO withdrawals (user_id, amount, status) VALUES (?, ?, 'pending')",
+      [user_id, amount]
+    );
 
-  if (!wallet || wallet.balance < amount) {
-    return res.json({ error: "Insufficient balance" });
+    await query(
+      "UPDATE wallet SET balance = balance - ? WHERE user_id=?",
+      [amount, user_id]
+    );
+
+    res.json({ success: true });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  const fee = amount * 0.1;
-  const final = amount - fee;
-
-  await query(UPDATE wallet SET balance=balance-? WHERE user_id=?,
-    [amount, user_id]);
-
-  await query(`
-    INSERT INTO withdrawals (user_id,amount,fee,final_amount,status)
-    VALUES (?,?,?,?, 'pending')
-  `, [user_id, amount, fee, final]);
-
-  res.json({ success: true });
 });
 
-/* ================= ADMIN ================= */
+/* ================= WEEKLY BONUS ================= */
 
-app.get("/admin/users", adminAuth, async (req, res) => {
-  const users = await query("SELECT * FROM users ORDER BY id DESC");
-  res.json(users);
+app.get("/admin/weekly-bonus", async (req, res) => {
+  try {
+    await query(
+      "UPDATE wallet SET balance = balance + 10"
+    );
+
+    res.json({ success: true });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get("/admin/payments", adminAuth, async (req, res) => {
-  const payments = await query("SELECT * FROM payments ORDER BY id DESC");
-  res.json(payments);
-});
+/* ================= NOWPAYMENTS ================= */
 
-app.get("/admin/withdrawals", adminAuth, async (req, res) => {
-  const data = await query("SELECT * FROM withdrawals ORDER BY id DESC");
-  res.json(data);
+app.post("/create-payment", async (req, res) => {
+  try {
+    const response = await axios.post(
+      "https://api.nowpayments.io/v1/invoice",
+      req.body,
+      {
+        headers: {
+          "x-api-key": process.env.NOWPAYMENTS_API_KEY,
+        },
+      }
+    );
+
+    res.json(response.data);
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /* ================= START ================= */
