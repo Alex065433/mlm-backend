@@ -1,5 +1,3 @@
-
-
 const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2/promise");
@@ -10,13 +8,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT 
+const PORT = process.env.PORT || 5000;
 
 /* ================= DB ================= */
 
 const db = mysql.createPool(process.env.MYSQL_URL);
-
-/* ================= HELPERS ================= */
 
 async function query(sql, params = []) {
   const [rows] = await db.execute(sql, params);
@@ -28,250 +24,246 @@ async function queryOne(sql, params = []) {
   return rows[0];
 }
 
-/* ================= ROOT ================= */
+/* ================= OPERATOR ID ================= */
 
-app.get("/", (req, res) => {
-  res.send("Backend Running 🚀");
-});
-
-/* ================= USERS ================= */
-
-app.get("/users", async (req, res) => {
-  try {
-    const users = await query("SELECT * FROM users");
-    res.json(users);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* ================= FIND PLACEMENT ================= */
-
-async function findPlacement(sponsor_id) {
-  let queue = [sponsor_id];
-
-  while (queue.length > 0) {
-    const current = queue.shift();
-    const user = await queryOne(
-      "SELECT * FROM users WHERE user_id=?",
-      [current]
+async function generateUniqueOperatorId() {
+  let id, exists = true;
+  while (exists) {
+    id = "ARW-" + Math.floor(100000 + Math.random() * 900000);
+    const check = await queryOne(
+      "SELECT operator_id FROM users WHERE operator_id = ?",
+      [id]
     );
-
-    if (!user) break;
-
-    if (!user.left_child || !user.right_child) {
-      return user;
-    }
-
-    queue.push(user.left_child);
-    queue.push(user.right_child);
+    if (!check) exists = false;
   }
-
-  return null;
+  return id;
 }
 
-/* ================= DIRECT INCOME ================= */
+/* ================= WALLET ================= */
 
-async function addDirectIncome(sponsor_id, from_user, amount) {
-  if (!sponsor_id) return;
-
-  const income = amount * 0.05;
-
+async function addIncome(user_id, amount, type, description) {
   await query(
-    "INSERT INTO direct_income (user_id, from_user, amount) VALUES (?, ?, ?)",
-    [sponsor_id, from_user, income]
+    "INSERT INTO transactions (user_id, amount, type, description) VALUES (?, ?, ?, ?)",
+    [user_id, amount, type, description]
   );
 
   await query(
-    "UPDATE wallet SET balance = balance + ? WHERE user_id=?",
-    [income, sponsor_id]
+    "UPDATE wallet SET balance = balance + ? WHERE user_id = ?",
+    [amount, user_id]
   );
-}
-
-/* ================= UPDATE COUNTS ================= */
-
-async function updateCounts(user_id, position) {
-  while (user_id) {
-    if (position === "left") {
-      await query(
-        "UPDATE users SET left_count = left_count + 1 WHERE user_id=?",
-        [user_id]
-      );
-    } else {
-      await query(
-        "UPDATE users SET right_count = right_count + 1 WHERE user_id=?",
-        [user_id]
-      );
-    }
-
-    const parent = await queryOne(
-      "SELECT parent_id, position FROM users WHERE user_id=?",
-      [user_id]
-    );
-
-    if (!parent || !parent.parent_id) break;
-
-    position = parent.position;
-    user_id = parent.parent_id;
-  }
-}
-
-/* ================= MATCHING ================= */
-
-async function checkMatchingIncome(user_id) {
-  const user = await queryOne(
-    "SELECT left_count, right_count FROM users WHERE user_id=?",
-    [user_id]
-  );
-
-  if (!user) return;
-
-  const pairs = Math.min(user.left_count, user.right_count);
-  if (pairs <= 0) return;
-
-  const income = pairs * 5;
-
-  await query(
-    "INSERT INTO matching_income (user_id, pairs, amount) VALUES (?, ?, ?)",
-    [user_id, pairs, income]
-  );
-
-  await query(
-    "UPDATE wallet SET balance = balance + ? WHERE user_id=?",
-    [income, user_id]
-  );
-
-  await query(
-    "UPDATE users SET left_count = left_count - ?, right_count = right_count - ? WHERE user_id=?",
-    [pairs, pairs, user_id]
-  );
-}
-
-/* ================= CREATE TREE ================= */
-
-async function createTree(user_id, sponsor_id, depth) {
-  if (depth <= 0) return;
-
-  const parent = await findPlacement(sponsor_id);
-  if (!parent) return;
-
-  for (let pos of ["left", "right"]) {
-    const newId = "U" + uuidv4().slice(0, 6);
-
-    await query(
-      `INSERT INTO users (user_id, sponsor_id, parent_id, position, status)
-       VALUES (?, ?, ?, ?, 'active')`,
-      [newId, sponsor_id, parent.user_id, pos]
-    );
-
-    // SAFE COLUMN HANDLING
-    const column = pos === "left" ? "left_child" : "right_child";
-
-    await query(
-      `UPDATE users SET ${column}=? WHERE user_id=?`,
-      [newId, parent.user_id]
-    );
-
-    await addDirectIncome(sponsor_id, newId, 50);
-    await updateCounts(parent.user_id, pos);
-    await checkMatchingIncome(parent.user_id);
-
-    await createTree(newId, sponsor_id, depth - 1);
-  }
 }
 
 /* ================= REGISTER ================= */
 
 app.post("/register", async (req, res) => {
   try {
-    const { name, email, sponsor_id, package_amount } = req.body;
+    const { name, email, password, sponsor_id, package_amount } = req.body;
 
-    if (!package_amount || package_amount < 50) {
-      return res.json({ error: "Minimum 50 required" });
-    }
-
-    const mainId = "U" + uuidv4().slice(0, 6);
+    const user_id = "U" + uuidv4().slice(0, 6);
+    const operator_id = await generateUniqueOperatorId();
 
     await query(
-      "INSERT INTO users (user_id, name, email, sponsor_id, status) VALUES (?, ?, ?, ?, 'active')",
-      [mainId, name, email, sponsor_id]
+      `INSERT INTO users 
+      (user_id, operator_id, name, email, password, sponsor_id, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [user_id, operator_id, name, email, password, sponsor_id, "active"]
     );
 
-    await query(
-      "INSERT INTO wallet (user_id, balance) VALUES (?, 0)",
-      [mainId]
-    );
+    await query("INSERT INTO wallet (user_id, balance) VALUES (?, 0)", [user_id]);
 
-    if (package_amount > 50) {
-      const levels = Math.floor(package_amount / 100);
-      await createTree(mainId, sponsor_id, levels);
+    /* ===== DIRECT REFERRAL INCOME ===== */
+    if (sponsor_id) {
+      await addIncome(sponsor_id, 10, "direct", "Direct Referral Bonus");
     }
 
-    res.json({ success: true, user_id: mainId });
+    /* ===== BINARY TREE ===== */
+    await placeInBinary(user_id, sponsor_id);
+
+    res.json({ success: true, user_id, operator_id });
 
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+/* ================= BINARY LOGIC ================= */
+
+async function placeInBinary(user_id, sponsor_id) {
+  if (!sponsor_id) return;
+
+  const sponsor = await queryOne(
+    "SELECT * FROM users WHERE user_id = ?",
+    [sponsor_id]
+  );
+
+  if (!sponsor) return;
+
+  if (!sponsor.left_child) {
+    await query(
+      "UPDATE users SET left_child = ? WHERE user_id = ?",
+      [user_id, sponsor_id]
+    );
+    await updateCounts(sponsor_id, "left");
+  } else if (!sponsor.right_child) {
+    await query(
+      "UPDATE users SET right_child = ? WHERE user_id = ?",
+      [user_id, sponsor_id]
+    );
+    await updateCounts(sponsor_id, "right");
+  } else {
+    await placeInBinary(user_id, sponsor.left_child); // recursion
+  }
+}
+
+/* ================= MATCHING ================= */
+
+async function updateCounts(user_id, side) {
+  let current = await queryOne(
+    "SELECT * FROM users WHERE user_id = ?",
+    [user_id]
+  );
+
+  while (current) {
+    if (side === "left") {
+      await query(
+        "UPDATE users SET left_count = left_count + 1 WHERE user_id = ?",
+        [current.user_id]
+      );
+    } else {
+      await query(
+        "UPDATE users SET right_count = right_count + 1 WHERE user_id = ?",
+        [current.user_id]
+      );
+    }
+
+    const updated = await queryOne(
+      "SELECT left_count, right_count FROM users WHERE user_id = ?",
+      [current.user_id]
+    );
+
+    const pairs = Math.min(updated.left_count, updated.right_count);
+
+    if (pairs > 0) {
+      await addIncome(current.user_id, pairs * 5, "matching", "Binary Matching");
+    }
+
+    current = await queryOne(
+      "SELECT * FROM users WHERE user_id = ?",
+      [current.parent_id]
+    );
+  }
+}
+
+/* ================= LOGIN ================= */
+
+app.post("/login", async (req, res) => {
+  const { operator_id, password } = req.body;
+
+  const user = await queryOne(
+    "SELECT * FROM users WHERE operator_id = ?",
+    [operator_id]
+  );
+
+  if (!user || user.password !== password) {
+    return res.json({ error: "Invalid credentials" });
+  }
+
+  res.json({ success: true, user });
+});
+
+/* ================= USERS ================= */
+
+app.get("/users", async (req, res) => {
+  const users = await query("SELECT * FROM users");
+  res.json(users);
+});
+
+/* ================= WALLET ================= */
+
+app.get("/wallet/:id", async (req, res) => {
+  const wallet = await queryOne(
+    "SELECT * FROM wallet WHERE user_id = ?",
+    [req.params.id]
+  );
+  res.json(wallet);
 });
 
 /* ================= WITHDRAW ================= */
 
 app.post("/withdraw", async (req, res) => {
-  try {
-    const { user_id, amount } = req.body;
+  const { user_id, amount } = req.body;
 
-    await query(
-      "INSERT INTO withdrawals (user_id, amount, status) VALUES (?, ?, 'pending')",
-      [user_id, amount]
-    );
+  const wallet = await queryOne(
+    "SELECT balance FROM wallet WHERE user_id = ?",
+    [user_id]
+  );
 
-    await query(
-      "UPDATE wallet SET balance = balance - ? WHERE user_id=?",
-      [amount, user_id]
-    );
-
-    res.json({ success: true });
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  if (wallet.balance < amount) {
+    return res.json({ error: "Insufficient balance" });
   }
+
+  await query(
+    "UPDATE wallet SET balance = balance - ? WHERE user_id = ?",
+    [amount, user_id]
+  );
+
+  await query(
+    "INSERT INTO withdrawals (user_id, amount, status) VALUES (?, ?, 'pending')",
+    [user_id, amount]
+  );
+
+  res.json({ success: true });
 });
 
-/* ================= WEEKLY BONUS ================= */
-
-app.get("/admin/weekly-bonus", async (req, res) => {
-  try {
-    await query("UPDATE wallet SET balance = balance + 10");
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/* ================= PAYMENT ================= */
+/* ================= PAYMENT (NOWPAYMENTS) ================= */
 
 app.post("/create-payment", async (req, res) => {
   try {
     const response = await axios.post(
       "https://api.nowpayments.io/v1/invoice",
-      req.body,
+      {
+        price_amount: req.body.amount,
+        price_currency: "usd",
+        pay_currency: "usdtbsc"
+      },
       {
         headers: {
-          "x-api-key": process.env.NOWPAYMENTS_API_KEY,
-        },
+          "x-api-key": process.env.NOWPAYMENTS_API_KEY
+        }
       }
     );
 
     res.json(response.data);
-
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+/* ================= ADMIN ================= */
+
+app.get("/admin/users", async (req, res) => {
+  const users = await query("SELECT * FROM users");
+  res.json(users);
+});
+
+app.get("/admin/withdrawals", async (req, res) => {
+  const data = await query("SELECT * FROM withdrawals");
+  res.json(data);
+});
+
+app.post("/admin/approve-withdraw", async (req, res) => {
+  const { id } = req.body;
+
+  await query(
+    "UPDATE withdrawals SET status = 'approved' WHERE id = ?",
+    [id]
+  );
+
+  res.json({ success: true });
+});
+
 /* ================= START ================= */
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("Server running on port", PORT);
+app.listen(PORT, () => {
+  console.log("Server running on", PORT);
 });
