@@ -238,7 +238,88 @@ app.post("/create-payment", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+/* ================= ADMIN PANEL ================= */
 
+// Dashboard Stats
+app.get("/admin/stats", async (req, res) => {
+  try {
+    const totalUsers = await queryOne("SELECT COUNT(*) as count FROM users");
+    const activeUsers = await queryOne("SELECT COUNT(*) as count FROM users WHERE status='active'");
+    const totalDeposit = await queryOne("SELECT SUM(amount) as total FROM transactions WHERE type='deposit'");
+    const totalWithdraw = await queryOne("SELECT SUM(amount) as total FROM transactions WHERE type='withdraw'");
+
+    res.json({
+      totalUsers: totalUsers.count,
+      activeUsers: activeUsers.count,
+      totalDeposit: totalDeposit.total || 0,
+      totalWithdraw: totalWithdraw.total || 0
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get All Users
+app.get("/admin/users", async (req, res) => {
+  try {
+    const users = await query(`
+      SELECT u.user_id, u.operator_id, u.name, u.email, u.status, w.balance
+      FROM users u
+      LEFT JOIN wallet w ON u.user_id = w.user_id
+    `);
+
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update User
+app.put("/admin/user/:id", async (req, res) => {
+  try {
+    const { balance, status } = req.body;
+
+    await query("UPDATE wallet SET balance=? WHERE user_id=?", [balance, req.params.id]);
+    await query("UPDATE users SET status=? WHERE user_id=?", [status, req.params.id]);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Transactions
+app.get("/admin/transactions", async (req, res) => {
+  try {
+    const data = await query("SELECT * FROM transactions ORDER BY created_at DESC");
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Withdraw Action
+app.post("/admin/withdraw/action", async (req, res) => {
+  try {
+    const { id, action } = req.body;
+
+    const withdraw = await queryOne("SELECT * FROM withdrawals WHERE id=?", [id]);
+
+    if (!withdraw) return res.json({ error: "Invalid request" });
+
+    if (action === "approve") {
+      await query("UPDATE withdrawals SET status='approved' WHERE id=?", [id]);
+      await query("UPDATE wallet SET balance = balance - ? WHERE user_id=?", [withdraw.amount, withdraw.user_id]);
+    } else {
+      await query("UPDATE withdrawals SET status='rejected' WHERE id=?", [id]);
+    }
+
+    res.json({ success: true });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 /* ================= ADMIN ================= */
 
 app.get("/admin/users", async (req, res) => {
