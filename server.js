@@ -112,7 +112,7 @@ async function placeInBinary(user_id, sponsor_id) {
 
 async function setPlacement(child, parent, position) {
   await query(
-    UPDATE users SET ${position}_child=? WHERE user_id=?,
+    "UPDATE users SET ${position}_child=? WHERE user_id=?,"
     [child, parent]
   );
 
