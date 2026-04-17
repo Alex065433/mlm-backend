@@ -71,10 +71,13 @@ app.post("/register", async (req, res) => {
 
     await query("INSERT INTO wallet (user_id, balance) VALUES (?, 0)", [user_id]);
 
-    /* ===== DIRECT REFERRAL INCOME ===== */
-    if (sponsor_id) {
-      await addIncome(sponsor_id, 10, "direct", "Direct Referral Bonus");
-    }
+    /* ===== DIRECT REFERRAL (CORRECT) ===== */
+if (sponsor_id && package_amount > 50) {
+  const ids = Math.floor(package_amount / 50);
+  const directIncome = ids * 2.5;
+
+  await addIncome(sponsor_id, directIncome, "direct", "Direct Referral");
+}
 
     /* ===== BINARY TREE ===== */
     await placeInBinary(user_id, sponsor_id);
@@ -92,63 +95,69 @@ async function placeInBinary(user_id, sponsor_id) {
   if (!sponsor_id) return;
 
   const sponsor = await queryOne(
-    "SELECT * FROM users WHERE user_id = ?",
+    "SELECT left_child, right_child FROM users WHERE user_id=?",
     [sponsor_id]
   );
 
   if (!sponsor) return;
 
   if (!sponsor.left_child) {
-    await query(
-      "UPDATE users SET left_child = ? WHERE user_id = ?",
-      [user_id, sponsor_id]
-    );
-    await updateCounts(sponsor_id, "left");
+    await setPlacement(user_id, sponsor_id, "left");
   } else if (!sponsor.right_child) {
-    await query(
-      "UPDATE users SET right_child = ? WHERE user_id = ?",
-      [user_id, sponsor_id]
-    );
-    await updateCounts(sponsor_id, "right");
+    await setPlacement(user_id, sponsor_id, "right");
   } else {
-    await placeInBinary(user_id, sponsor.left_child); // recursion
+    throw new Error("Both positions filled");
   }
+}
+
+async function setPlacement(child, parent, position) {
+  await query(
+    UPDATE users SET ${position}_child=? WHERE user_id=?,
+    [child, parent]
+  );
+
+  await query(
+    "UPDATE users SET parent_id=?, position=? WHERE user_id=?",
+    [parent, position, child]
+  );
+
+  await updateCounts(parent, position);
 }
 
 /* ================= MATCHING ================= */
 
 async function updateCounts(user_id, side) {
   let current = await queryOne(
-    "SELECT * FROM users WHERE user_id = ?",
+    "SELECT user_id, parent_id, matched_pairs FROM users WHERE user_id=?",
     [user_id]
   );
 
   while (current) {
     if (side === "left") {
-      await query(
-        "UPDATE users SET left_count = left_count + 1 WHERE user_id = ?",
-        [current.user_id]
-      );
+      await query("UPDATE users SET left_count = left_count + 1 WHERE user_id=?", [current.user_id]);
     } else {
-      await query(
-        "UPDATE users SET right_count = right_count + 1 WHERE user_id = ?",
-        [current.user_id]
-      );
+      await query("UPDATE users SET right_count = right_count + 1 WHERE user_id=?", [current.user_id]);
     }
 
-    const updated = await queryOne(
-      "SELECT left_count, right_count FROM users WHERE user_id = ?",
+    const user = await queryOne(
+      "SELECT left_count, right_count, matched_pairs FROM users WHERE user_id=?",
       [current.user_id]
     );
 
-    const pairs = Math.min(updated.left_count, updated.right_count);
+    const pairs = Math.min(user.left_count, user.right_count);
+    const newPairs = pairs - (user.matched_pairs || 0);
 
-    if (pairs > 0) {
-      await addIncome(current.user_id, pairs * 5, "matching", "Binary Matching");
+    if (newPairs > 0) {
+      await addIncome(current.user_id, newPairs * 5, "matching", "Binary Matching");
+
+      await query(
+        "UPDATE users SET matched_pairs=? WHERE user_id=?",
+        [pairs, current.user_id]
+      );
     }
 
     current = await queryOne(
-      "SELECT * FROM users WHERE user_id = ?",
+      "SELECT user_id, parent_id FROM users WHERE user_id=?",
       [current.parent_id]
     );
   }
